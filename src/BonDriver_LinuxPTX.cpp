@@ -18,6 +18,7 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <dlfcn.h>
+#include <sys/time.h>
 
 #include "util.hpp"
 
@@ -30,7 +31,12 @@ BonDriver::BonDriver(Config& config)
 	current_system_(::PTX_UNSPECIFIED_SYSTEM),
 	current_space_(0),
 	current_channel_(0),
-	iorp_(*this)
+	iorp_(*this),
+	timestamp_before(0),
+	error_bit_count(0),
+	total_bit_count(0),
+	error_bit_adjust_timestamp(0),
+	error_bit_adjust_count(0)
 {
 	CharCodeConv cv;
 
@@ -268,6 +274,13 @@ LPCTSTR BonDriver::EnumChannelName(const DWORD dwSpace, const DWORD dwChannel)
 	}
 }
 
+static DWORD getTimestamp()
+{
+	timeval tv;
+	::gettimeofday(&tv, NULL);
+	return (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+}
+
 const BOOL BonDriver::SetChannel(const DWORD dwSpace, const DWORD dwChannel)
 {
 	std::lock_guard<std::mutex> lock(mtx_);
@@ -310,6 +323,12 @@ const BOOL BonDriver::SetChannel(const DWORD dwSpace, const DWORD dwChannel)
 	current_space_.store(dwSpace, std::memory_order_release);
 	current_channel_.store(dwChannel, std::memory_order_release);
 
+	timestamp_before.store(getTimestamp());
+	error_bit_count.store(0);
+	total_bit_count.store(0);
+	error_bit_adjust_timestamp.store(getTimestamp() + 2000);
+	error_bit_adjust_count.store(0);
+
 	ioq_->Start();
 	return TRUE;
 }
@@ -322,6 +341,51 @@ const DWORD BonDriver::GetCurSpace(void)
 const DWORD BonDriver::GetCurChannel(void)
 {
 	return current_channel_.load(std::memory_order_acquire);
+}
+
+const DWORD BonDriver::GetTotalDeviceNum(void)
+{
+	return 1;
+}
+
+const DWORD BonDriver::GetActiveDeviceNum(void)
+{
+	return (fd_ != -1) ? 1 : 0;
+}
+
+const BOOL BonDriver::SetLnbPower(const BOOL bEnable)
+{
+	return FALSE;
+}
+
+const QWORD BonDriver::GetPreErrorBitCount(void)
+{
+	return error_bit_count;
+}
+
+const QWORD BonDriver::GetPreTotalBitCount(void)
+{
+	return total_bit_count;
+}
+
+const QWORD BonDriver::GetPostErrorBitCount(void)
+{
+	return error_bit_count;
+}
+
+const QWORD BonDriver::GetPostTotalBitCount(void)
+{
+	return total_bit_count;
+}
+
+const QWORD BonDriver::GetErrorBlockCount(void)
+{
+	return error_bit_count;
+}
+
+const QWORD BonDriver::GetTotalBlockCount(void)
+{
+	return total_bit_count;
 }
 
 BonDriver::Space::Channel::Channel(CharCodeConv& cv, const std::string& name, int number, int slot)
@@ -389,6 +453,33 @@ const BonDriver::Space::Channel& BonDriver::Space::GetChannel(std::size_t pos) c
 	return channel_.at(pos);
 }
 
+void BonDriver::getPtxBer()
+{
+	if (fd_ == -1)
+		return;
+
+	struct ptx_ber ptx_ber = {
+		.error_bit_count = 0,
+		.total_bit_count = 0
+	};
+
+	if (ioctl(fd_, PTX_GET_BER, &ptx_ber) == -1) {
+		error_bit_count.store(0);
+		total_bit_count.store(0);
+	} else {
+		if (getTimestamp() < error_bit_adjust_timestamp.load()) {
+			error_bit_adjust_count.store(ptx_ber.error_bit_count);
+		}
+		if (ptx_ber.error_bit_count >= error_bit_adjust_count.load()) {
+			error_bit_count.store(ptx_ber.error_bit_count - error_bit_adjust_count.load());
+		}
+		else {
+			error_bit_count.store(ptx_ber.error_bit_count);
+		}
+		total_bit_count.store(ptx_ber.total_bit_count);
+	}
+}
+
 bool BonDriver::ReadProvider::Start()
 {
 	return (::ioctl(parent_.fd_, PTX_START_STREAMING) >= 0) ? true : false;
@@ -403,6 +494,21 @@ void BonDriver::ReadProvider::Stop()
 bool BonDriver::ReadProvider::Do(void *buf, std::size_t& size)
 {
 	::ssize_t count;
+
+	DWORD timestamp_now = getTimestamp();
+	if ((timestamp_now - parent_.timestamp_before.load()) > 1000) {
+		QWORD before_error_bit_count = parent_.error_bit_count.load();
+		parent_.getPtxBer();
+		QWORD after_error_bit_count = parent_.error_bit_count.load();
+		if (after_error_bit_count > before_error_bit_count) {
+			::fprintf(stderr, "BonDriver::ReadProvider::Do() ErrorBitCount increased by %llu (device[%s] space[%u] ch[%u] signal[%2.2f] before[%llu] after[%llu] total[%llu])\n",
+				after_error_bit_count - before_error_bit_count, parent_.device_.c_str(), parent_.current_space_.load(),
+				parent_.current_channel_.load(),
+				parent_.GetSignalLevel(), before_error_bit_count, after_error_bit_count, parent_.total_bit_count.load());
+			::fflush(stderr);
+		}
+		parent_.timestamp_before.store(timestamp_now);
+	}
 
 	count = ::read(parent_.fd_, buf, size);
 	if (count < 0)

@@ -11,6 +11,7 @@ typedef uint32_t DWORD;
 typedef uint16_t WCHAR;
 typedef const WCHAR * LPCWSTR;
 typedef LPCWSTR LPCTSTR;
+typedef unsigned long long QWORD;
 
 #define TRUE	1
 #define FALSE	0

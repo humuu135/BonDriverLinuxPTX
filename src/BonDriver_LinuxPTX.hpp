@@ -9,7 +9,7 @@
 #include <utility>
 
 #include "type_compat.h"
-#include "IBonDriver2.h"
+#include "IBonDriver4.h"
 #include "ptx_ioctl.h"
 #include "config.hpp"
 #include "char_code_conv.hpp"
@@ -17,7 +17,7 @@
 
 namespace BonDriver_LinuxPTX {
 
-class BonDriver final : public IBonDriver2 {
+class BonDriver final : public IBonDriver4 {
 public:
 	explicit BonDriver(Config& config);
 	~BonDriver();
@@ -55,6 +55,19 @@ public:
 
 	const DWORD GetCurSpace(void) override;
 	const DWORD GetCurChannel(void) override;
+
+	// IBonDriver3
+	const DWORD GetTotalDeviceNum(void);
+	const DWORD GetActiveDeviceNum(void);
+	const BOOL SetLnbPower(const BOOL bEnable);
+
+	// IBonDriver4
+	const QWORD GetPreErrorBitCount(void);
+	const QWORD GetPreTotalBitCount(void);
+	const QWORD GetPostErrorBitCount(void);
+	const QWORD GetPostTotalBitCount(void);
+	const QWORD GetErrorBlockCount(void);
+	const QWORD GetTotalBlockCount(void);
 
 	static BonDriver * GetInstance();
 
@@ -105,6 +118,8 @@ private:
 		std::vector<Channel> channel_;
 	};
 
+	void getPtxBer();
+
 	class ReadProvider final : public IoQueue::IoProvider {
 	public:
 		explicit ReadProvider(BonDriver& parent) noexcept : parent_(parent) {}
@@ -131,6 +146,12 @@ private:
 	std::atomic<::DWORD> current_channel_;
 	std::unique_ptr<IoQueue> ioq_;
 	ReadProvider iorp_;
+
+	std::atomic<::DWORD> timestamp_before;
+	std::atomic<::QWORD> error_bit_count;
+	std::atomic<::QWORD> total_bit_count;
+	std::atomic<::DWORD> error_bit_adjust_timestamp;
+	std::atomic<::QWORD> error_bit_adjust_count;
 
 	static void DestroyInstance();
 
